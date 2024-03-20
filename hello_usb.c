@@ -29,7 +29,12 @@
 #define NUM_SHIFTREG 6
 #define NUM_PINS_PER_SHIFTREG 16
 
-#define THRESHOLD_SENSOR 1986 // 1.6v
+// divide voltage by (3.3 / 4096) to get raw value
+// threshold can safely be between 1.6v (1986) and 1.9v (2358)
+#define THRESHOLD_SENSOR 1986
+
+// the above (press) threshold minus this amount is the unpress threshold
+#define HYSTERESIS 38 // 0.3v
 
 #define KEY_ROLLOVER 6
 #define L2_REPEATABLES_QUEUE_SIZE 4
@@ -63,7 +68,8 @@ struct button* buttons[NUM_SHIFTREG][NUM_PINS_PER_SHIFTREG];
 uint8_t g_active_mods;
 uint8_t keyboard_keys[KEY_ROLLOVER];
 
-const uint16_t extra_keys[] = {
+const uint16_t EXTRA_KEYS[] = {
+	0,
 	0x00CD, // play/pause
 	0x00E9, // volunme up
 	0x00EA, // volume down
@@ -285,7 +291,7 @@ int main() {
 
 void hid_task(void)
 {
-// Poll every 10ms
+// Poll every 1ms
 const uint32_t interval_ms = 1;
 static uint32_t start_ms = 0;
 
@@ -301,7 +307,7 @@ for(int i = 0; i < NUM_SHIFTREG; i++){
     gpio_put(PINS_ENABLE[i], 0);
     for(int j = 0; j < NUM_PINS_PER_SHIFTREG; j++){
 
-        state = 0;
+        state = 0; // 0 means unpressed
 
         button = buttons[i][j];
 
@@ -324,13 +330,18 @@ for(int i = 0; i < NUM_SHIFTREG; i++){
                 gpio_put(PIN_S0, 1);
             }
             // sleep_us(15); // this is what riskable uses; adds 1.44 ms to full scan
+            // without sleep here, adjacent scans interfere with eachother
             sleep_us(7); // seems to be enough
             uint16_t result = adc_read();
             
             // printf("%f ", result * conversion_factor);
             // if (result*conversion_factor > THRESHOLD_SENSOR){
             // if (result > THRESHOLD_SENSOR){
-            state = (result > THRESHOLD_SENSOR) ? 1 : 0;
+
+            // state = (result > THRESHOLD_SENSOR) ? 1 : 0;
+            if ((result > THRESHOLD_SENSOR) || (result > (THRESHOLD_SENSOR - HYSTERESIS) && button->stuff.pressed)){
+                state = 1;
+            }
             
             if(button->stuff.pressed && !state){
                 
@@ -543,10 +554,34 @@ uint8_t usb_keyboard_send(void){
         if(c>KEY_ROLLOVER){ break; }
     }
     tud_hid_keyboard_report(REPORT_ID_KEYBOARD, g_active_mods, keycode);
-    // sleep_ms(500);
 }
 
 uint8_t usb_extra_send(void){
+
+    uint8_t c = 0;
+    uint8_t keycode[KEY_ROLLOVER] = { 0 };
+    struct button* current_button;
+    for(int i=0; i<NUM_SHIFTREG; i++){
+        for (int j=0; j< NUM_PINS_PER_SHIFTREG; j++){
+            current_button = buttons[i][j];
+            if(current_button){
+                if(current_button->current_extra_key){
+                    while(!tud_hid_ready()){
+                        tud_task();
+                    }
+                    tud_hid_report(REPORT_ID_CONSUMER_CONTROL, &(EXTRA_KEYS[current_button->current_extra_key]), 2);
+                    return 1;
+                }
+            }
+        }
+    }
+
+    // else send empty if nothing to send
+    uint16_t empty_key = 0;
+    while(!tud_hid_ready()){
+        tud_task();
+    }
+    tud_hid_report(REPORT_ID_CONSUMER_CONTROL, &empty_key, 2);
 }
 
 void pulse(struct button* button, uint8_t scancode, uint8_t extra_mods){
